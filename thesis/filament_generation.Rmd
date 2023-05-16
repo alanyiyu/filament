@@ -1,0 +1,404 @@
+---
+title: "filament_generation"
+output: pdf_document
+---
+
+Idea 1: generate a set of points (~15?), connect the dots, smooth, and add noise
+```{r}
+
+```
+
+Idea 2: start at a random point, choose an initial direction, move in that direction continuously, change direction (within 15 degrees) with prob=p, change direction more (within 30 degrees) with prob=q, and so on; keep track of truth and add noise as you go. 
+```{r}
+generate_filament <- function(n, step_size, bool_func) {
+  # bool_func: generate function by restricting theta
+  x <- c(); y <- c()
+  x[1] <- runif(1)
+  y[1] <- runif(1)
+  theta <- runif(1, 0, 360)
+  if (bool_func) {
+    theta <- runif(1, -30, 30)
+  }
+  
+  data.x <- c()
+  data.y <- c()
+  
+  for (i in 2:n) {
+    # idea 1: generate data on axis orthogonal to direction
+    # idea 2: generate data in bivariate normal around point
+    
+    perp_theta <- theta + 90
+    # should implement random number of points
+    # num_points <- runif(1, 0, 2)
+    dist <- rnorm(1, 0, 0.08)
+    data.x[i-1] <- x[i-1] + dist*cos(perp_theta*pi/180)
+    data.y[i-1] <- y[i-1] + dist*sin(perp_theta*pi/180)
+    
+    
+    x[i] <- x[i-1] + step_size*cos(theta*pi/180)
+    y[i] <- y[i-1] + step_size*sin(theta*pi/180)
+    
+    if (bool_func) {
+      old_theta <- theta
+      theta <- theta + rnorm(1, 0, 15)
+      while (theta > 90 | theta < -90) {
+        theta <- old_theta + rnorm(1, 0, 15)
+      }
+    }
+    else { theta <- theta + rnorm(1, 0, 15) }
+    # could implement some idea of inertia to prevent sharp switchbacks/encourage smoothness?
+  }
+  
+  # scale to [0,1]
+  #x_scale <- max(abs(x))
+  #y_scale <- max(abs(y))
+  
+  #data.x < data.x/x_scale
+  #data.y <- data.y/y_scale
+  #x <- x/x_scale
+  #y <- y/y_scale
+  
+  #plot(x, y, xlim = 0:1, ylim = 0:1, type='l')
+  x <- (x-min(x))/(max(x)-min(x)) 
+  y <- (y-min(y))/(max(y)-min(y))
+  data.x <- (data.x-min(data.x))/(max(data.x)-min(data.x))
+  data.y <- (data.y-min(data.y))/(max(data.y)-min(data.y))
+  #plot(x, y, type='l')
+  #points(data.x, data.y)
+  return(cbind(data.x, data.y))
+}
+
+plot(generate_filament(100, .05, TRUE))
+```
+Constrained mean shift algorithm
+
+```{r}
+bi_normal_kernel_y <- function(x, y, data, h) {
+  # data is nx2 matrix
+  x_data <- data[,1]; y_data <- data[,2]
+  # what if you wanted both x and y? would there be an easier way that just returning both?
+  return(sum((dnorm((x-x_data)/h))*(dnorm((y-y_data)/h))*y_data)/sum((dnorm((x-x_data)/h))*(dnorm((y-y_data)/h))))
+}
+```
+
+
+```{r}
+data <- generate_filament(100, .05, TRUE)
+#data <- rbind(data, generate_filament(100, .05, TRUE))
+
+# x_data <- data[,1]; y_data <- data[,2]
+mesh <- data
+h <- .05
+
+
+for (iter in 1:50) { #temp; convergence criteria
+  for (i in 1:nrow(mesh)) {
+    mesh[i,2] <- bi_normal_kernel_y(mesh[i,1], mesh[i,2], data, h)
+  }
+}
+
+plot(sort(mesh[,1]), mesh[order(mesh[,1]),2], cex=.3, col='red')
+points(data)
+```
+
+```{r}
+set.seed(47)
+data <- generate_filament(100, .05, TRUE)
+
+# x_data <- data[,1]; y_data <- data[,2]
+mesh <- data
+h <- .1
+mesh
+
+
+for (iter in 1:50) { #temp; convergence criteria
+  for (i in 1:nrow(mesh)) {
+    mesh[i,2] <- bi_normal_kernel_y(mesh[i,1], mesh[i,2], data, h)
+  }
+}
+
+library(gapminder)
+df <- gapminder
+
+plot(data)
+library(plotly)
+
+anim <- plot_ly(
+  x = 
+)
+  
+#lines(sort(mesh[,1]), mesh[order(mesh[,1]),2] )
+```
+
+
+```{r}
+constrained_mean_shift <- function(data,) {
+  x <- data[,1]; y <- data[,2]
+  
+  for (i in 1:5) {
+    
+  }
+}
+
+
+```
+
+
+To implement:
+Choose a point --> local PCA
+
+```{r}
+data <- generate_filament(100, .05, TRUE)
+pca <- prcomp(data)
+pca$x # what is this?
+pca$rotation
+pca$sdev
+
+plot_components <- function(data) {
+  pca <- prcomp(data)
+  x_origin <- mean(data[,1]); y_origin <- mean(data[,2])
+  x_pca <- pca$rotation[1,1]*pca$sdev[1]; y_pca <- pca$rotation[2,1]*pca$sdev[1]
+  x_pca2 <- pca$rotation[1,2]*pca$sdev[2]; y_pca2 <- pca$rotation[2,2]*pca$sdev[2]
+  
+  plot(data, asp=1)
+  lines(c(x_origin, x_origin+x_pca), c(y_origin, y_origin+y_pca), col='red')
+  lines(c(x_origin, x_origin+x_pca2), c(y_origin, y_origin+y_pca2), col='red')
+}
+
+plot_components(data) # need to fix scaling so it doesn't squish (how?)
+```
+
+
+Local PCA (to-do: separate visualization from function; to-do: center PCA at mean(x, y) of points)
+```{r}
+data <- generate_filament(100, .05, TRUE)
+library(plotrix)
+local_pca <- function(point, data, r, m) {
+  # idea: take data within ellipse given by m*(principal components)?
+  plot(data, asp = 1)
+  draw.circle(data[point,1], data[point,2], r)
+  d <- as.matrix(dist(data))[point,]
+  n.point <- data[which(d < r),]
+  pca <- prcomp(n.point)
+  #print(prcomp(n.point))
+  points(n.point, pch=19, col='red')
+  points(data[point,1],data[point,2], pch=19, col='blue')
+  draw.ellipse(data[point,1],data[point,2], a=m*pca$sdev[1], b=m*pca$sdev[2], angle = atan2(pca$rotation[2,1],pca$rotation[1,1]), deg=FALSE, border="red")
+}
+local_pca(47, data, 0.1, 3.5)
+```
+
+1. Now, we want to iteratively stretch the ellipse (i.e., calculate local PCA using the points inside the ellipse) until we start losing signal (in this case, we can define this as the ratio of first principal component variance to second principal component variance decreasing under some threshold (how to define? based on previous iteration?)).
+
+2. Then we do the same circle --> ellipse strategy on either side.
+
+3. Connect ellipses.
+
+```{r}
+in_ellipse <- function(data, center, a, b, theta) {
+# params:
+  # point (x, y)
+  # center (x, y)
+  # a (major axis)
+  # b (minor axis)
+  # theta (angle of rotation)
+  
+  #plot(data, asp = 1)
+  #draw.ellipse(center[1], center[2], a=a, b=b, angle=theta, deg=FALSE)
+  
+  pt_in_ellipse <- c()
+  
+  for (i in 1:nrow(data)) {
+    centered_point <- data[i,]-center
+    x <- centered_point[1]; y <- centered_point[2]
+    pt_in_ellipse[i] <- ((x*cos(theta)+y*sin(theta))^2/a^2 + (x*sin(theta)-y*cos(theta))^2/b^2) <= 1
+  }
+  return(pt_in_ellipse)
+}
+
+#in_ellipse(cbind(c(1, 2, 3), c(1, 2, 3)), c(2, 2), .5, .5, 0)
+```
+
+
+```{r}
+data <- generate_filament(100, .05, TRUE)
+library(plotrix)
+point <- 47; r <- 0.1; m <- 3.5
+#local_pca2 <- function(point, data, r, m) {
+  # idea: take data within ellipse given by m*(principal components)?
+plot(data, asp = 1)
+draw.circle(data[point,1], data[point,2], r)
+d <- as.matrix(dist(data))[point,]
+n.point <- data[which(d < r),]
+pca <- prcomp(n.point)
+#print(prcomp(n.point))
+points(n.point, pch=19, col='red')
+points(data[point,1],data[point,2], pch=19, col='blue')
+draw.ellipse(data[point,1],data[point,2], a=m*pca$sdev[1], b=m*pca$sdev[2], angle = atan2(pca$rotation[2,1],pca$rotation[1,1]), deg=FALSE, border="red")
+center <- c(data[point,1],data[point,2])
+pts_in_ellipse <- data[which(in_ellipse(data, center, m*pca$sdev[1], m*pca$sdev[2], atan2(pca$rotation[2,1], pca$rotation[1,1]))),]
+print(pts_in_ellipse)
+points(pts_in_ellipse, col='green')
+#}
+local_pca(47, data, 0.1, 3.5)
+```
+
+```{r}
+local_pca_expand <- function(point, data, r, m) {
+    # idea: take data within ellipse given by m*(principal components)?
+  plot(data, asp = 1)
+  #draw.circle(data[point,1], data[point,2], r)
+  d <- as.matrix(dist(data))[point,]
+  n.point <- data[which(d < r),]
+    
+  # re-center
+  # more sophisticated approach: compute distance from each point in circle to all other points and take the point with the minimum aggregate?
+  center <- c(mean(n.point[,1]), mean(n.point[,2]))
+  n.point <- data[which(in_ellipse(data, center, r, r, 0)),]
+  
+  pca <- prcomp(n.point)
+  a <- m*pca$sdev[1]
+  b <- m*pca$sdev[2]
+  theta <- atan2(pca$rotation[2,1], pca$rotation[1,1])
+  stopping_ratio <- a/b
+  #center <- c(data[point,1],data[point,2])
+  
+  
+  #stopping criteria
+  while (1) {
+  #for (i in 1:5) {
+    pts_in_ellipse <- data[which(in_ellipse(data, center, a, b, theta)),] # do we want to adjust the center? no, right?
+    pca.new <- prcomp(pts_in_ellipse)
+    a.new <- m*pca.new$sdev[1]
+    b.new <- m*pca.new$sdev[2]
+    theta.new <- atan2(pca.new$rotation[2,1], pca.new$rotation[1,1])
+    stopping_ratio.new <- a.new/b.new
+    
+    
+    #draw.ellipse(data[point,1],data[point,2], a.new, b.new, theta.new, deg=FALSE, border="red")
+    
+    # terminate if the ratio of first principal component to second did not improve
+    if ((stopping_ratio.new - stopping_ratio) <= 0) break
+    
+    pca <- pca.new
+    a <- a.new
+    b <- b.new
+    theta <- theta.new
+    stopping_ratio <- stopping_ratio.new
+  } # we need the second to last!!!
+  
+  draw.ellipse(center[1], center[2], a, b, theta, deg=FALSE, border="blue")
+  points(center[1], center[2], col="red")
+  return (c(center[1], center[2], a, b, theta))
+}
+
+#points(n.point, pch=19, col='red')
+#points(data[point,1],data[point,2], pch=19, col='blue')
+  #draw.ellipse(data[point,1],data[point,2], a=m*pca$sdev[1], b=m*pca$sdev[2], angle = atan2(pca$rotation[2,1],pca$rotation[1,1]), deg=FALSE, border="red")
+```
+
+```{r}
+library(plotrix)
+data <- generate_filament(100, .05, FALSE)
+local_pca_expand(47, data, 0.1, 3.5)
+```
+
+First, we find the two points nearest the endpoints of the line segment given by the previous ellipse's major axis.
+
+```{r}
+nearest_point <- function(point, data) {
+  dists <- sqrt((point[1]-data[,1])^2+(point[2]-data[,2])^2)
+  return (data[which.min(dists),])
+}
+```
+
+```{r}
+#eventually want to clean up local_pca_expand and merge this function in
+expand_from_point <- function(point, data, r, m) {
+  init_ellipse <- local_pca_expand(point, data, r, m) #returns return (c(center[1], center[2], a, b, theta))
+  a <- init_ellipse[2]
+  theta <- init_ellipse[5]
+  #print(theta*180/pi)
+  e1 <- c(init_ellipse[1]+a*cos(theta), init_ellipse[2]+a*sin(theta))
+  e2 <- c(init_ellipse[1]-a*cos(theta), init_ellipse[2]-a*sin(theta))
+  points(e2[1], e2[2], col="red")
+  points(e1[1], e1[2], col="red")
+  endpoints <- rbind(e1, e2)
+  lines(endpoints[,1], endpoints[,2])
+  return (endpoints)
+}
+```
+
+
+
+```{r}
+generate_linear_est <- function(point, data, r, m) {
+  library(plotrix)
+  #plot
+  #plot(data, asp = 1)
+  
+  endpoints <- expand_from_point(point, data, r, m)
+  
+  ellipses <- matrix(endpoints, nrow=1)
+  
+  e1 <- endpoints[1,]
+  e2 <- endpoints[2,]
+  
+  n1 <- nearest_point(e1, data)
+  n2 <- nearest_point(e2, data)
+  
+  points(n1[1], n1[2], col="green")
+  points(n2[1], n2[2], col="green")
+  
+  expand_from_point(n1, data, r, m)
+  expand_from_point(n2, data, r, m)
+}
+```
+
+```{r}
+library(plotrix)
+data <- generate_filament(100, .05, FALSE)
+generate_linear_est(47, data, 0.1, 3.5)
+```
+
+Approach:
+1. Choose starting points at random (iterative, y2 not in neighborhood around y1, and so on)
+2. Expand ellipses until all points are contained within some ellipse
+3. 
+```{r}
+set.seed(47)
+data <- generate_filament(100, .05, FALSE)
+generate_linear_est(47, data, 0.1, 3.5)
+```
+
+
+
+
+Now, we want to map the resulting linear piecewise estimate into 1-space.
+
+```{r}
+grid_size <- 1
+theta <- -5*pi/180
+fl <- c(0, 1)
+fr <- fl + c(grid_size*cos(theta), grid_size*sin(theta))
+a1 <- pi/2; a2 <- 2*theta + pi - a1
+delta <- 1
+lu <- fl + c(delta*cos(a1), delta*sin(a1))
+ru <- fr + c(delta*cos(a2), delta*sin(a2))
+
+ld <- fl - c(delta*cos(a1), delta*sin(a1))
+rd <- fr - c(delta*cos(a2), delta*sin(a2))
+
+plot(rbind(fl, fr, lu, ru, ld, rd), asp=1)
+
+  # find which triangle point is in
+  # express as convex combo of __
+```
+
+
+To-do: implement algorithm 4 from Spectral Clustering Based on Local PCA
+
+
+CMU paper preprocessing density estimation
+erase points with too low density
+run constrained mean shift on remaining data

@@ -1,0 +1,932 @@
+---
+title: "thesis_code"
+output: pdf_document
+---
+
+## Refactoring
+
+
+#### Generating data
+Idea: start at a random point, choose an initial direction, move in that direction continuously, change direction (within 15 degrees) with prob=p, change direction more (within 30 degrees) with prob=q, and so on; keep track of truth and add noise as you go. 
+```{r}
+generate_filament <- function(n, step_size, bool_func) {
+  # bool_func: generate function by restricting theta
+  x <- c(); y <- c()
+  x[1] <- runif(1)
+  y[1] <- runif(1)
+  theta <- runif(1, 0, 360)
+  if (bool_func) {
+    theta <- runif(1, -30, 30)
+  }
+  
+  data.x <- c()
+  data.y <- c()
+  
+  for (i in 2:n) {
+    # idea 1: generate data on axis orthogonal to direction
+    # idea 2: generate data in bivariate normal around point
+    
+    perp_theta <- theta + 90
+    # should implement random number of points
+    # num_points <- runif(1, 0, 2)
+    dist <- rnorm(1, 0, 0.08)
+    data.x[i-1] <- x[i-1] + dist*cos(perp_theta*pi/180)
+    data.y[i-1] <- y[i-1] + dist*sin(perp_theta*pi/180)
+    
+    x[i] <- x[i-1] + step_size*cos(theta*pi/180)
+    y[i] <- y[i-1] + step_size*sin(theta*pi/180)
+    
+    if (bool_func) {
+      old_theta <- theta
+      theta <- theta + rnorm(1, 0, 15)
+      while (theta > 90 | theta < -90) {
+        theta <- old_theta + rnorm(1, 0, 15)
+      }
+    }
+    else { theta <- theta + rnorm(1, 0, 15) }
+    # could implement some idea of inertia to prevent sharp switchbacks/encourage smoothness?
+  }
+  
+  # scale to [0,1]
+  #x_scale <- max(abs(x))
+  #y_scale <- max(abs(y))
+  
+  #data.x < data.x/x_scale
+  #data.y <- data.y/y_scale
+  #x <- x/x_scale
+  #y <- y/y_scale
+  
+  #plot(x, y, xlim = 0:1, ylim = 0:1, type='l')
+  x <- (x-min(x))/(max(x)-min(x)) 
+  y <- (y-min(y))/(max(y)-min(y))
+  data.x <- (data.x-min(data.x))/(max(data.x)-min(data.x))
+  data.y <- (data.y-min(data.y))/(max(data.y)-min(data.y))
+  #plot(x, y, type='l')
+  #points(data.x, data.y)
+  return(cbind(data.x, data.y))
+}
+
+plot(generate_filament(100, .05, TRUE))
+```
+
+
+#### Helper Functions
+
+to_vec: returns line segment
+```{r}
+library(zeallot)
+# params: center, angle (rad), magnitude
+# return: vector
+to_vec <- function(x, y, magnitude, theta) {
+  return(c(cos(theta)*magnitude, sin(theta)*magnitude))
+}
+```
+
+
+Constrained mean-shift algorithm
+
+```{r}
+bi_normal_kernel_y <- function(x, y, data, h) {
+  # data is nx2 matrix
+  x_data <- data[,1]; y_data <- data[,2]
+  # what if you wanted both x and y? would there be an easier way that just returning both?
+  return(sum((dnorm((x-x_data)/h))*(dnorm((y-y_data)/h))*y_data)/sum((dnorm((x-x_data)/h))*(dnorm((y-y_data)/h))))
+}
+```
+
+Adapt mean shift to generalized direction
+
+```{r}
+constrained_mean_shift <- function(pt, theta, data, h) {
+  x <- pt[1]; y <- pt[2]
+  #x_data <- data[,1]; y_data <- data[,2]
+  
+  # change of basis matrix
+  cob <- rbind(c(cos(theta), -sin(theta)), c(sin(theta), cos(theta)))
+  
+  # right multiply to transform
+  new_data <- data %*% cob
+  new_x <- new_data[,1]
+  new_y <- new_data[,2]
+  
+  rotated_pt <- pt %*% cob
+  
+  # kernel weighting
+  kw <- dnorm((x-new_x)/h)#*dnorm((y-new_y)/h)
+  new_pt <- c(rotated_pt[1], sum(new_y*kw)/sum(kw))
+  return(new_pt %*% t(cob))
+}
+```
+
+
+Returns logical vector of points in ellipse
+```{r}
+in_ellipse <- function(data, center, a, b, theta) {
+# params:
+  # point (x, y)
+  # center (x, y)
+  # a (major axis)
+  # b (minor axis)
+  # theta (angle of rotation)
+  
+  #plot(data, asp = 1)
+  #draw.ellipse(center[1], center[2], a=a, b=b, angle=theta, deg=FALSE)
+  
+  pt_in_ellipse <- c()
+  
+  for (i in 1:nrow(data)) {
+    centered_point <- data[i,]-center
+    x <- centered_point[1]; y <- centered_point[2]
+    pt_in_ellipse[i] <- ((x*cos(theta)+y*sin(theta))^2/a^2 + (x*sin(theta)-y*cos(theta))^2/b^2) <= 1
+  }
+  return(pt_in_ellipse)
+}
+
+#in_ellipse(cbind(c(1, 2, 3), c(1, 2, 3)), c(2, 2), .5, .5, 0)
+```
+
+Choose random start points, excluding points within neighborhoods of those already chosen
+
+```{r}
+get_centers <- function(data, r) {
+  centers <- c()
+  bool <- logical(nrow(data))
+  while (!all(bool)) {
+    center <- sample(which(!bool), 1)
+    #while (bool[center] == FALSE) center <- sample(nrow(data), 1)
+    pt <- data[center,]
+    centers <- c(centers, center)
+    bool[which(in_ellipse(data, pt, r, r, 0))] <- TRUE
+  }
+  return(centers) # returns as index of input data
+}
+```
+
+smooth: 
+data params x, y
+bandwith param bw
+
+returns smoothed estimate as n x 2 array
+
+```{r}
+# returns n x 2 matrix of x and y values
+smooth <- function(x, y, bw) {
+  n <- length(x)
+  smooth.x <- c()
+  smooth.y <- c()
+  for (i in 1:n) {
+    if (i-bw < 1) {
+      bw1 <- 1
+      bw2 <- 2*i-1
+    }
+    else if (i+bw > n) {
+      bw1 <- i-(n-i)
+      bw2 <- n
+    }
+    else {
+      bw1 <- i-bw
+      bw2 <- i+bw
+    }
+    #bw1 <- max(1, i-bw)  #need to force a symmetric kernel here -> if i-bw = 1, bw2 -> i+1
+    #bw2 <- min(i + bw, length(new.x))
+    smooth.x[i] <- mean(x[bw1:bw2], na.rm=TRUE)
+    smooth.y[i] <- mean(y[bw1:bw2], na.rm=TRUE)
+  }
+  return(cbind(smooth.x, smooth.y))
+}
+```
+
+generate_grid: 
+data params x, y
+grid size param eps
+
+returns gridding along input points as n x 2 array
+
+```{r}
+# input: grid ordered by x-values
+generate_grid <- function(x, y, eps) {
+  d <- c()
+  for (i in 1:(length(x)-1)) {
+   d[i] <- sqrt((x[i+1]-x[i])^2+(y[i+1]-y[i])^2)
+  }
+  lastx <- 1
+  new.x <- x[1]
+  new.y <- y[1]
+  k <- 2
+  while (lastx < length(x)) {
+    if (d[lastx] > eps) {
+      weight <- eps/d[lastx]
+      new.x[k] <- x[lastx+1]*weight + (1-weight)*x[lastx]
+      new.y[k] <- y[lastx+1]*weight + (1-weight)*y[lastx]
+      d[lastx] <- d[lastx]-eps
+      x[lastx] <- new.x[k]
+      y[lastx] <- new.y[k]
+      k <- k + 1
+    } else {
+      eps1 <- eps-d[lastx]
+      lastx <- lastx + 1
+      weight <- eps1/d[lastx]
+      new.x[k] <- x[lastx+1]*weight + (1-weight)*x[lastx]
+      new.y[k] <- y[lastx+1]*weight + (1-weight)*y[lastx]
+      d[lastx] <- d[lastx]-eps1
+      x[lastx] <- new.x[k]
+      y[lastx] <- new.y[k]
+      k <- k + 1
+    }
+  }
+  new.x[k] <- x[length(x)]
+  new.y[k] <- y[length(y)]
+  return(cbind(na.omit(new.x), na.omit(new.y)))
+}
+
+# want to return:
+  # new x, new y
+  # direction to next x, y
+  # perpendicular direction
+```
+
+
+
+```{r}
+x <- seq(0, 2, by=0.03)
+y <- sin(x*3)/2
+plot(x, y, cex=0.1)
+
+grid <- generate_grid(x, y, 0.01)
+new.x <- na.omit(grid[,1])
+new.y <- na.omit(grid[,2])
+
+d1 <- c()
+for (i in 1:(length(new.x)-1)) {
+ d1[i] <- sqrt((new.x[i+1]-new.x[i])^2+(new.y[i+1]-new.y[i])^2)
+} 
+
+#   w <- c(x[i+1]-x[i], y[i+1]-y[i])
+#   w <- w/sqrt(sum(w^2))
+#   x[i+1] <- x[i] + w[1]*eps
+#   y[i+1] <- y[i] + w[2]*eps
+# }
+#points(new.x, new.y, col='red', cex=.1)
+bw <- 25
+smooth.x <- smooth(new.x, new.y, bw)[,1]
+smooth.y <- smooth(new.x, new.y, bw)[,2]
+lines(smooth.x, smooth.y)
+
+smooth.grid <- generate_grid(smooth.x, smooth.y, 0.008)
+smooth.grid.x <- smooth.grid[,1]
+smooth.grid.y <- smooth.grid[,2]
+
+points(smooth.grid.x, smooth.grid.y, col='blue', cex=.1)
+
+d1 <- c()
+for (i in 1:(length(smooth.grid.x)-1)) {
+  d1[i] <- sqrt((smooth.grid.x[i+1]-smooth.grid.x[i])^2+(smooth.grid.y[i+1]-smooth.grid.y[i])^2)
+} 
+```
+
+mapping: figure out which grid points it's closest to, then project onto the line to find mapping
+
+
+```{r}
+x_data <- seq(0, 2, by=0.03)
+y_data <- sin(x_data*3)/2 + rnorm(length(x_data), 0, 0.05)
+plot(smooth.grid.x, smooth.grid.y, cex=0.1)
+points(x_data, y_data)
+
+data <- cbind(x_data, y_data)
+grid <- cbind(smooth.grid.x, smooth.grid.y)
+
+pt <- data[30,]
+
+pts <- data[c(6, 19, 30, 36, 48),]
+points(pts[,1], pts[,2], col='red')
+points(pt[1], pt[2], col="red")
+
+# append data point to grid matrix
+grid_with_point <- rbind(pt, grid)
+dists <- as.matrix(dist(grid_with_point))[-1,1] # should correct the indices here to avoid confusion
+t <- which.min(dists)
+if (dists[t+1] < dists[t-1]) {
+  a_index <- t
+  b_index <- t+1
+} else {
+  a_index <- t-1
+  b_index <- t
+}
+
+# get a, b
+a <- grid[a_index,]
+b <- grid[b_index,]
+
+# projection of v onto h (horizontal direction)
+v <- pt-a
+h <- b-a
+
+proj <- (sum(v*h)/sum(h*h))*h
+x_dist <- sqrt(sum(proj*proj))
+
+# v minus the above projection (vertical direction)
+y_proj <- v-proj
+y_dist <- sqrt(sum(y_proj*y_proj))
+if (y_proj[2] < 0) y_dist <- y_dist*(-1)
+```
+
+get_mapping:
+data param data
+grid 
+
+```{r}
+# find nearest by taking min of distance from all grid points, then just need to determine if right or left
+
+get_mapping <- function(data, grid) {
+  mapped_data_x <- c()
+  mapped_data_y <- c()
+  
+  d <- as.matrix(dist(grid))
+  map <- c(0, cumsum(d[row(d)+1 == col(d)]))
+  
+  for (i in 1:nrow(data)) {
+    pt <- data[i,]
+    grid_with_point <- rbind(pt, grid)
+    dists <- as.matrix(dist(grid_with_point))[-1,1] # should correct the indices here to avoid confusion
+    t <- which.min(dists)
+    if (t == 1) {
+      a_index <- t
+      b_index <- t+1
+    } else if (t == length(dists)) {
+      a_index <- t-1
+      b_index <- t
+    } else if (dists[t+1] < dists[t-1]) {
+      a_index <- t
+      b_index <- t+1
+    } else {
+      a_index <- t-1
+      b_index <- t
+    }
+    
+    # get a, b
+    a <- grid[a_index,]
+    b <- grid[b_index,]
+    
+    # projection of v onto h (horizontal direction)
+    v <- pt-a
+    h <- b-a
+    
+    proj <- (sum(v*h)/sum(h*h))*h
+    x_dist <- sqrt(sum(proj*proj))
+    
+    # v minus the above projection (vertical direction)
+    y_proj <- v-proj
+    y_dist <- sqrt(sum(y_proj*y_proj))
+    
+    cross_prod <- v[1]*h[2]-h[1]*v[2]
+    y_dist <- y_dist - 2*y_dist*(cross_prod > 0)
+    #if (cross_prod < 0) y_dist <- y_dist*(-1)
+    
+    #arcl <- t*eps
+    # 0.08 is not exact -- need to find by taking distances from distance matrix FIX THIS
+    mapped_data_x[i] <- map[a_index]+x_dist 
+    mapped_data_y[i] <- y_dist
+  }
+  return(cbind(mapped_data_x, mapped_data_y))
+}
+
+mapped_data <- get_mapping(data, grid)
+plot(data, col=1+(mapped_data[,2]>0))
+points(grid, col='blue', cex=0.2)
+
+
+mapped_data <- get_mapping(data, grid)
+plot(mapped_data[,1], mapped_data[,2])
+mapped_pts <- mapped_data[c(6, 19, 30, 36, 48),]
+points(mapped_pts[,1], mapped_pts[,2], col='red')
+abline(h=0)
+```
+
+```{r}
+# remember mapping distances
+d <- as.matrix(dist(grid))
+map <- c(0, cumsum(d[row(d)+1 == col(d)]))
+
+# recover mapping directions
+dirs <- c()
+for (i in 1:length(map)-1) {
+  v <- grid[i+1,]-grid[i,]
+  dirs <- rbind(dirs, v/sqrt(sum(v^2)))
+}
+
+inverted_data <- c()
+
+for (i in 1:nrow(mapped_data)) {
+  x <- mapped_data[i,1]
+  y <- mapped_data[i,2]
+  
+  # which grid index corresponds to the point
+  grid_ind <- which.min(x-map + 100*((x-map) < 0))
+  x_pos <- (x-map[grid_ind])
+  y_pos <- y
+  
+  # in the original space
+  d <- dirs[grid_ind,]
+  d_ortho <- c(d[1], -d[2])
+  
+  # theta
+  theta <- atan2(y_pos, x_pos)
+  rotation <- rbind(c(cos(theta), -sin(theta)), c(sin(theta), cos(theta)))
+  v <- d*sqrt(x_pos^2+y_pos^2)
+  new_v <- as.vector(rotation %*% v)
+  
+  #inverted_data <- rbind(inverted_data, grid[grid_ind,] + x_pos*d + y_pos*d_ortho)
+  inverted_data <- rbind(inverted_data, grid[grid_ind,] + new_v)
+}
+
+plot(inverted_data[,1], inverted_data[,2])
+points(data, col='blue', cex=0.5)
+sum((inverted_data-data)^2)
+```
+
+Invert mapping function
+
+```{r}
+get_invert_mapping <- function(mapped_data, grid) {
+  # remember mapping distances
+  d <- as.matrix(dist(grid))
+  map <- c(0, cumsum(d[row(d)+1 == col(d)]))
+  
+  # recover mapping directions
+  dirs <- c()
+  for (i in 1:length(map)-1) {
+    v <- grid[i+1,]-grid[i,]
+    dirs <- rbind(dirs, v/sqrt(sum(v^2)))
+  }
+  dirs <- rbind(dirs, dirs[(length(map)-1),]) #workaround until I can fix this issue
+  
+  inverted_data <- c()
+  
+  for (i in 1:nrow(mapped_data)) {
+    x <- mapped_data[i,1]
+    y <- mapped_data[i,2]
+    
+    # which grid index corresponds to the point
+    grid_ind <- which.min(x-map + 100*((x-map) < 0))
+    x_pos <- (x-map[grid_ind])
+    y_pos <- y
+    
+    # in the original space
+    d <- dirs[grid_ind,]
+    d_ortho <- c(d[1], -d[2])
+    
+    # theta
+    theta <- atan2(y_pos, x_pos)
+    rotation <- rbind(c(cos(theta), -sin(theta)), c(sin(theta), cos(theta)))
+    v <- d*sqrt(x_pos^2+y_pos^2)
+    new_v <- as.vector(rotation %*% v)
+    
+    #inverted_data <- rbind(inverted_data, grid[grid_ind,] + x_pos*d + y_pos*d_ortho)
+    inverted_data <- rbind(inverted_data, grid[grid_ind,] + new_v)
+  }
+  
+  return(inverted_data)
+}
+```
+
+
+```{r}
+inverted_data <- get_invert_mapping(mapped_data, grid)
+plot(inverted_data)
+points(data, cex=0.5)
+```
+
+
+
+```{r}
+library(zeallot)
+library(plotrix)
+# choose initial point in warped space
+pt <- sample(1:nrow(mapped_data), 1)
+plot(mapped_data)
+c(x, y, a, b, theta) %<-% local_pca_expand(pt, mapped_data, .3, 3)
+```
+
+
+```{r}
+generate_spiral <- function(n, step_size) {
+  x <- c(); y <- c()
+  x[1] <- 0
+  y[1] <- 0
+  theta <- 0
+  r <- 0
+  
+  data.x <- c()
+  data.y <- c()
+  
+  for (i in 2:n) {
+    # idea 1: generate data on axis orthogonal to direction
+    # idea 2: generate data in bivariate normal around point
+    
+    x[i] <- r*cos(theta*pi/180)
+    y[i] <- r*sin(theta*pi/180)
+    
+    theta <- theta + 5
+    r <- r + 0.01
+  }
+  return(cbind(x, y))
+}
+
+plot(generate_spiral(120, 0.05))
+```
+
+```{r}
+generate_circle <- function(n, step_size) {
+  # bool_func: generate function by restricting theta
+  x <- c(); y <- c()
+  x[1] <- runif(1)
+  y[1] <- runif(1)
+  theta <- runif(1, 0, 360)
+  
+  data.x <- c()
+  data.y <- c()
+  
+  for (i in 2:n) {
+    # idea 1: generate data on axis orthogonal to direction
+    # idea 2: generate data in bivariate normal around point
+    
+    perp_theta <- theta + 90
+    # should implement random number of points
+    # num_points <- runif(1, 0, 2)
+    dist <- rnorm(1, 0, 0.08)
+    data.x[i-1] <- x[i-1] + dist*cos(perp_theta*pi/180)
+    data.y[i-1] <- y[i-1] + dist*sin(perp_theta*pi/180)
+    
+    
+    x[i] <- x[i-1] + step_size*cos(theta*pi/180)
+    y[i] <- y[i-1] + step_size*sin(theta*pi/180)
+    
+    theta <- theta + 3
+  }
+  
+  x <- (x-min(x))/(max(x)-min(x)) 
+  y <- (y-min(y))/(max(y)-min(y))
+  data.x <- (data.x-min(data.x))/(max(data.x)-min(data.x))
+  data.y <- (data.y-min(data.y))/(max(data.y)-min(data.y))
+  
+  return(cbind(data.x, data.y))
+}
+
+plot(generate_spiral(120, 0.05))
+```
+
+```{r}
+add_noise <- function(data) {
+  min.x <- min(data[,1])
+  max.x <- max(data[,1])
+  min.y <- min(data[,2])
+  max.y <- max(data[,2])
+  
+  noise.x <- runif(nrow(data)/2, min.x, max.x)
+  noise.y <- runif(nrow(data)/2, min.y, max.y)
+  noise <- cbind(noise.x, noise.y)
+  return(rbind(data, noise))
+}
+```
+
+```{r}
+get_pts_on_line <- function(data, centers, eps) {
+  points <- c()
+  prev <- data[centers[1],]
+  for (i in 2:length(centers)) {
+    curr <- data[centers[i],]
+    v <- curr-prev
+    v_norm <- sqrt(sum(v^2))
+    v <- v/v_norm
+    d <- 0
+    while(d < v_norm) {
+      points <- rbind(points, prev+d*v)
+      d <- d + eps
+    }
+    prev <- curr
+  }
+  return(points)
+}
+```
+
+```{r}
+get_pts_on_line2 <- function(data, pts, eps) {
+  line <- c()
+  prev <- pts[1,]
+  for (i in 2:nrow(pts)) {
+    curr <- pts[i,]
+    v <- curr-prev
+    v_norm <- sqrt(sum(v^2))
+    v <- v/v_norm
+    d <- 0
+    while(d < v_norm) {
+      line <- rbind(line, prev+d*v)
+      d <- d + eps
+    }
+    prev <- curr
+  }
+  return(line)
+}
+```
+
+Test on generated data
+
+```{r}
+set.seed(47)
+data <- generate_filament(100, 0.05, FALSE)
+#data <- add_noise(generate_circle(120, 0.05))
+centers <- c(1, sort(get_centers(data, 0.2)), nrow(data))
+plot(data)
+```
+```{r}
+centers <- sort(get_centers(data, 0.2))
+new_centers <- c()
+for (i in 1:length(centers)) {
+  pts <- data[in_ellipse(data, data[centers[i],], 0.2, 0.2, 0),]
+  if (length(pts) <= 2) {
+    next
+  }
+  pca <- prcomp(pts)
+  theta <- atan2(pca$rotation[2,1], pca$rotation[1,1])
+  new_centers <- rbind(new_centers, constrained_mean_shift(as.vector(data[centers[i],]), theta, pts, 0.2))
+}
+plot(data)
+points(data[centers,], col='blue')
+points(new_centers, col='red')
+```
+
+
+```{r}
+plot(data)
+#line <- get_pts_on_line(data, centers, 0.01)
+line <- get_pts_on_line2(data, new_centers, 0.01)
+points(line, cex=.1)
+```
+
+
+```{r}
+new.x <- line[,1]
+new.y <- line[,2]
+
+bw <- 10
+smooth.x <- smooth(new.x, new.y, bw)[,1]
+smooth.y <- smooth(new.x, new.y, bw)[,2]
+plot(data)
+lines(smooth.x, smooth.y)
+```
+
+```{r}
+smooth.x <- inverted_data[,1]
+smooth.y <- inverted_data[,2]
+```
+
+
+```{r}
+smooth.grid <- generate_grid(smooth.x, smooth.y)
+smooth.grid.x <- smooth.grid[,1]
+smooth.grid.y <- smooth.grid[,2]
+
+plot(data)
+points(smooth.grid, col='blue', cex=.1)
+```
+
+```{r}
+warped_data <- get_mapping(data, smooth.grid)
+plot(warped_data)
+abline(h=0, col='blue')
+```
+
+```{r}
+warped_centers <- sort(get_centers(warped_data, 0.2))
+
+new_warped_centers <- c()
+for (i in 1:length(warped_centers)) {
+  pts <- warped_data[in_ellipse(warped_data, warped_data[warped_centers[i],], 0.05, 0.05, 0),]
+  if (length(pts) <= 2) {
+    next
+  }
+  pca <- prcomp(pts)
+  theta <- atan2(pca$rotation[2,1], pca$rotation[1,1])
+  new_warped_centers <- rbind(new_warped_centers, constrained_mean_shift(as.vector(warped_data[warped_centers[i],]), theta, pts, 0.05))
+}
+
+warped_line <- get_pts_on_line2(warped_data, new_warped_centers, 0.01)
+
+plot(warped_data)
+#points(warped_data[warped_centers,], col='blue')
+points(new_warped_centers, col='red')
+lines(warped_line)
+```
+```{r}
+warped.x <- warped_line[,1]
+warped.y <- warped_line[,2]
+
+bw <- 10
+smooth.warped.x <- smooth(warped.x, warped.y, bw)[,1]
+smooth.warped.y <- smooth(warped.x, warped.y, bw)[,2]
+
+smooth_warped_line <- cbind(smooth.warped.x, smooth.warped.y)
+plot(warped_data)
+lines(smooth_warped_line)
+```
+
+
+JUST A TEST
+```{r}
+d <- as.matrix(dist(smooth.grid))
+map <- c(0, cumsum(d[row(d)+1 == col(d)]))
+
+# recover mapping directions
+dirs <- c()
+for (i in 1:length(map)-1) {
+  v <- smooth.grid[i+1,]-smooth.grid[i,]
+  dirs <- rbind(dirs, v/sqrt(sum(v^2)))
+}
+dirs <- rbind(dirs, dirs[(length(map)-1),])
+```
+
+```{r}
+inverted_data <- get_invert_mapping(smooth_warped_line, smooth.grid)
+plot(data)
+#points(smooth.grid, cex=0.5, col='blue')
+lines(inverted_data, col='blue')
+```
+```{r}
+line <- inverted_data
+```
+
+
+```{r}
+iterate <- function(data, estimate) {
+  x <- estimate[,1]
+  y <- estimate[,2]
+  
+  bw <- 8
+  smooth.x <- smooth(x, y, bw)[,1]
+  smooth.y <- smooth(x, y, bw)[,2]
+  
+  grid <- generate_grid(smooth.x, smooth.y, 0.008)
+  
+  warped_data <- get_mapping(data, grid)
+  warped_centers <- c(1, sort(get_centers(warped_data, 0.2)), nrow(warped_data))
+  warped_line <- get_pts_on_line(warped_data, centers, 0.01)
+  #warped_line <- smooth(warped_line[,1], warped_line[,2], bw)
+  
+  inverted_estimate <- get_invert_mapping(warped_line, grid)
+  return(inverted_estimate)
+}
+
+estimate <- line
+for (i in 1:5) {
+  estimate <- iterate(data, estimate)
+}
+plot(data)
+#points(iterate(data, line), cex=0.5, col='red')
+smooth_estimate <- smooth(estimate[,1], estimate[,2], 8)
+lines(smooth_estimate, cex=0.5, col='red')
+
+plot(get_mapping(data, estimate))
+```
+
+```{r}
+iterate2 <- function(data, estimate) {
+  x <- estimate[,1]
+  y <- estimate[,2]
+  
+  grid <- generate_grid(x, y, 0.008)
+  
+  warped_data <- get_mapping(data, grid)
+  warped_centers <- c(1, sort(get_centers(warped_data, 0.3)), nrow(warped_data))
+  #warped_line <- get_pts_on_line(warped_data, centers, 0.01)
+  #warped_line <- smooth(warped_line[,1], warped_line[,2], bw)
+  
+  #warped_centers <- sort(get_centers(warped_data, 0.2))
+
+  new_warped_centers <- c()
+  for (i in 1:length(warped_centers)) {
+    pts <- warped_data[in_ellipse(warped_data, warped_data[warped_centers[i],], 0.05, 0.05, 0),]
+    if (length(pts) <= 2) {
+      next
+    }
+    pca <- prcomp(pts)
+    theta <- atan2(pca$rotation[2,1], pca$rotation[1,1])
+    new_center <- constrained_mean_shift(as.vector(warped_data[warped_centers[i],]), theta, pts, 0.05)
+    print(new_center)
+    if (is.na(new_center)) new_center <- as.vector(warped_data[warped_centers[i],])
+    new_warped_centers <- rbind(new_warped_centers, new_center)
+  }  # do this until convergence
+  
+  
+  # what's causing N/A values??
+  
+  #new_warped_centers <- na.omit(new_warped_centers)
+  
+  warped_line <- get_pts_on_line2(warped_data, new_warped_centers, 0.01)
+  
+  warped.x <- warped_line[,1]
+  warped.y <- warped_line[,2]
+  
+  bw <- 10
+  
+  smooth_warped_line <- smooth(warped.x, warped.y, bw)
+  
+  inverted_estimate <- get_invert_mapping(smooth_warped_line, grid)
+  return(inverted_estimate)
+}
+
+set.seed(22)
+data <- generate_filament(100, 0.05, TRUE)
+plot(data)
+
+centers <- sort(get_centers(data, 0.2))
+new_centers <- c()
+for (i in 1:length(centers)) {
+  pts <- data[in_ellipse(data, data[centers[i],], 0.2, 0.2, 0),]
+  if (length(pts) <= 2) {
+    next
+  }
+  pca <- prcomp(pts)
+  print(pca)
+  theta <- atan2(pca$rotation[2,1], pca$rotation[1,1])
+  new_centers <- rbind(new_centers, constrained_mean_shift(as.vector(data[centers[i],]), theta, pts, 0.2))
+}
+
+
+plot(data)
+points(data[centers,], col='blue')
+points(new_centers, col='red')
+
+plot(data)
+#line <- get_pts_on_line(data, centers, 0.01)
+line <- get_pts_on_line2(data, new_centers, 0.01)
+points(line, cex=.1)
+
+estimate <- line
+for (i in 1:6) {
+  print(i)
+  estimate <- iterate2(data, estimate)
+}
+plot(data)
+#points(new_centers, col='blue')
+points(estimate, cex=0.5, col='red')
+#points(iterate2(data, line), cex=0.5, col='red')
+smooth_estimate <- smooth(estimate[,1], estimate[,2], 8)
+lines(smooth_estimate, cex=0.5, col='red')
+
+plot(get_mapping(data, estimate))
+```
+
+1. use arias castro to find the ordering of the connecting points
+2. mean shift y in warped space at 0, arc length to prevent shrinkage
+
+
+
+```{r}
+get_pts_on_line2 <- function(data, pts, eps) {
+  line <- c()
+  prev <- pts[1,]
+  for (i in 2:nrow(pts)) {
+    curr <- pts[i,]
+    #print(curr)
+    v <- curr-prev
+    v_norm <- sqrt(sum(v^2))
+    v <- v/v_norm
+    d <- 0
+    while(d < v_norm) {
+      line <- rbind(line, prev+d*v)
+      d <- d + eps
+    }
+    prev <- curr
+  }
+  return(line)
+}
+```
+
+
+```{r}
+library(zeallot)
+library(plotrix)
+# choose initial point in warped space
+pt <- sample(1:nrow(warped_data), 1)
+plot(warped_data)
+c(x, y, a, b, theta) %<-% local_pca_expand(pt, warped_data, .3, 3)
+plot(warped_data)
+
+get_centers_pca <- function(data, r) {
+  centers <- c()
+  bool <- logical(nrow(data))
+  while (!all(bool)) {
+    center <- sample(which(!bool), 1)
+    pt <- data[center,]
+    centers <- c(centers, center)
+    c(x, y, a, b, theta) %<-% local_pca_expand(center, data, r, 3)
+    #print(c(x, y, a, b, theta))
+    bool[which(in_ellipse(data, pt, a, b, theta))] <- TRUE
+    print(bool)
+  }
+  return(centers) # returns as index of input data
+}
+
+centers <- c(1, sort(get_centers_pca(warped_data, .3)), nrow(warped_data))
+```
