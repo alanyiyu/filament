@@ -645,6 +645,139 @@ get_mapping <- function(data, grid) {
 }
 ```
 
+
+```{r}
+compute_angle <- function(v1,v2) {
+  # computes the angle between two vectors
+  norm1 <- sqrt(sum(v1^2))
+  norm2 <- sqrt(sum(v2^2))
+  b <- sum(v1*v2)/(norm1*norm2)
+  theta <- acos(max(-1,sum(v1*v2)/(norm1*norm2)))
+  return(theta)
+}
+
+rotate_vector <- function(v0, v1, v2, wide) {
+  # rotates a vector counter-clockwise to be equidistant between v0 and v2 extended out from v1
+  vnew <- (v2-v1)/sqrt(sum((v2-v1)^2))*wide  
+  theta <- compute_angle(v2-v1,v0-v1) / 2
+  r <- matrix(c(cos(theta), sin(theta), -sin(theta), cos(theta)), nrow=2)
+  vnew1 <- t(r %*% vnew) + v1
+  theta <- pi - theta 
+  r <- matrix(c(cos(theta), sin(theta), -sin(theta), cos(theta)), nrow=2)
+  vnew2 <- t(r %*% vnew) + v1
+  d <- as.matrix(dist(rbind(vnew1,vnew2, v0,v2)))
+  rotvec <- vnew1
+  if (abs(d[4,1]-d[3,1]) > abs(d[4,2]-d[3,2]))
+    rotvec <- vnew2
+  return(rotvec)
+}
+  
+grid_spoke <- function(grid, wide) {
+  # creates the spokes from each grid point which, in addition to the vectors formed between adjacent grid points, forms the basis for R^2 which is used in the map
+  spokes <- c()
+  for (i in 2:(nrow(grid)-1)) {
+    a1 <- grid[i-1,]
+    a <- grid[i,]
+    b <- grid[i+1,]
+    spokes <- rbind(spokes, rotate_vector(a1, a, b, wide))
+  } 
+  spokes <- rbind(spokes[1,]-grid[2,]+grid[1,], spokes, spokes[nrow(spokes),]-grid[nrow(grid)-1,]+grid[nrow(grid),])
+  return(spokes)
+}
+
+grid_length <- function(grid) {
+  # measures the length of the grid
+  m <- nrow(grid)
+  d <- as.matrix(dist(grid))
+  return(c(0,cumsum(d[cbind(2:m, 1:(m-1))])))
+}
+
+
+get_mapping <- function(data, grid, wide=1) {
+  # maps points in the data space into the warped space
+  spokes <- grid_spoke(smooth.grid, wide)
+  mapped_data_x <- c()
+  mapped_data_y <- c()
+
+  d <- as.matrix(dist(grid))
+  map <- c(0, cumsum(d[row(d)+1 == col(d)]))
+  
+  grid.l <- grid_length(grid)
+  x_dists <- c()
+  y_dists <- c()
+  wts <- matrix(0,nrow=nrow(data), ncol=2) -> mapped
+  for (i in 1:nrow(data)) {
+    pt <- data[i,]
+    grid_with_point <- rbind(pt, grid)
+    dists <- as.matrix(dist(grid_with_point))[-1,1] # should correct the indices here to avoid confusion
+    t <- which.min(dists)
+    if (t == 1) {
+      a_index <- t
+      b_index <- t+1
+    } else if (t == length(dists)) {
+      a_index <- t-1
+      b_index <- t
+    } else if (dists[t+1] < dists[t-1]) {
+      a_index <- t
+      b_index <- t+1
+      #print("right")
+    } else {
+      a_index <- t-1
+      b_index <- t
+      #print("left")
+    }
+    
+    # get a, b
+    a <- grid[a_index,]
+    b <- grid[b_index,]
+    v1 <- (b-a)/sqrt(sum((b-a)^2))
+    v2 <- spokes[a_index,]-a 
+    mat <- as.matrix(cbind(v1,v2)) 
+    wts[i,] <- t(solve(mat) %*% t(t(pt-a)))
+    mapped[i,] <- c(grid.l[a_index]+wts[i,1],wts[i,2])
+  }
+  return(mapped)
+}
+    
+
+inv_mapping <- function(pts_map, grid) {
+  # maps data from the warped space back into the data space
+  grid.l <- grid_length(grid)
+  spokes <- grid_spoke(smooth.grid, 1)
+  pt.back <- matrix(0,nrow=nrow(pts_map), ncol=2)
+  for (i in 1:nrow(pts_map)) {
+    pt <- pts_map[i,]
+    t <- max(which(pt[1] > grid.l))
+    w1 <- pt[1]-grid.l[t]
+    w2 <- pt[2]
+    v1 <- (grid[t+1,]-grid[t,])/sqrt(sum((grid[t+1,]-grid[t,])^2))
+    v2 <- spokes[t,]-grid[t,]
+    pt.back[i,] <- w1*v1 + w2*v2 + grid[t,]
+  }
+  return(pt.back)
+}
+
+## sample usage
+plot(grid)
+spokes <- grid_spoke(grid, 1)
+for (i in 1:nrow(grid)) {
+  lines(rbind(grid[i,], spokes[i,]))
+}
+par(mfrow=c(2,1))        
+pts <- grid[sample(337,50),]+rnorm(100,0,.03)
+plot(pts, t='n', asp=1)
+lines(grid)
+points(pts,col='red')
+pts.mapped <- get_mapping(pts, grid)
+plot(pts.mapped,col='red')
+abline(0,0)
+pts.back <- inv_mapping(pts.mapped, grid)
+par(mfrow=c(1,1))
+plot(pts, t='n')
+lines(grid)
+points(pts.back,col='red')
+points(pts, col='blue', cex=.8)
+```
 ```{r}
 mapped_data <- get_mapping(data, grid)
 plot(data, col=1+(mapped_data[,2]>0))
