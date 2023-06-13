@@ -695,7 +695,7 @@ grid_length <- function(grid) {
 
 get_mapping <- function(data, grid, wide=1) {
   # maps points in the data space into the warped space
-  spokes <- grid_spoke(smooth.grid, wide)
+  spokes <- grid_spoke(grid, wide)
   mapped_data_x <- c()
   mapped_data_y <- c()
 
@@ -743,7 +743,7 @@ get_mapping <- function(data, grid, wide=1) {
 inv_mapping <- function(pts_map, grid) {
   # maps data from the warped space back into the data space
   grid.l <- grid_length(grid)
-  spokes <- grid_spoke(smooth.grid, 1)
+  spokes <- grid_spoke(grid, 1)
   pt.back <- matrix(0,nrow=nrow(pts_map), ncol=2)
   for (i in 1:nrow(pts_map)) {
     pt <- pts_map[i,]
